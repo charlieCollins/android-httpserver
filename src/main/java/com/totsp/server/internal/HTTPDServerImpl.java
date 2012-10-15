@@ -354,6 +354,12 @@ public class HTTPDServerImpl implements IHTTPDServer {
 
             // NOTE JavaDoc "Closing the returned OutputStream will close the associated socket"         
             dest.close();
+            
+            try {
+               fis.close();
+            } catch (IOException e) {
+               Log.e(Constants.LOG_TAG, "Error closing fis", e);
+            }
          }
 
          Log.i(Constants.LOG_TAG, "      duration:" + (System.currentTimeMillis() - start));
