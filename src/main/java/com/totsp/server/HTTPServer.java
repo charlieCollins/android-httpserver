@@ -1,4 +1,11 @@
-package com.totsp.server.internal;
+package com.totsp.server;
+
+
+import com.totsp.server.enums.Status;
+import com.totsp.server.enums.SupportedFileType;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -10,6 +17,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.URLConnection;
+import java.net.URLDecoder;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -21,77 +29,150 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import android.util.Log;
-
-import com.totsp.server.Constants;
-import com.totsp.server.IHTTPDServer;
-
 /**
- * HTTPD server for serving JPG and MP4/3GP files from Android (only handles GET, and only allows files of certain types).
- * Primitive, but works, and supports Partial Content (HTTP 206) for use with some TV SDKs.
+ * HTTPD server for serving content FROM an Android device. 
+ * (Only handles GET, and has only been tested/used with media files on external storage.)
  * 
- * Should be started OFF OF the main/UI thread (obviously).
+ * (Supports Partial Content, HTTP 206, for streaming.)
+ * 
  * 
  * @author charliecollins
  *
  */
-public class HTTPDServerImpl implements IHTTPDServer {
+public class HTTPServer {
 
+   // TODO generalize this more and allow users to specify a responsehandler 
+   // (so it can be used for more than just serving files from existing filesystem)
+
+   private static final String DEFAULT_USER_AGENT = "AndroidHTTPServer";
+   private static final int BUFFER_SIZE = 4096; // small, yeah, we run this on phones and stuff
    private static final String ANDROID_BUILD_MODEL = android.os.Build.MODEL;
    private static final String ANDROID_BUILD_VERSION = android.os.Build.VERSION.RELEASE;
-
-   ///private static final List<String> SUPPORTED_FILE_EXTENSIONS = Lists.newArrayList("jpg", "jpeg", "mp4", "m4v", "3gp");
-
-   private static final SimpleDateFormat DFMT = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z");
+   private static final SimpleDateFormat INET_DFMT = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z");
    static {
-      DFMT.setTimeZone(TimeZone.getTimeZone("GMT"));
+      INET_DFMT.setTimeZone(TimeZone.getTimeZone("GMT"));
    }
 
-   private static final int BUFFER_SIZE = 4096;
-   
-   private final ExecutorService executor;
+   private static final Logger LOG = LoggerFactory.getLogger(HTTPServer.class);
 
-   public HTTPDServerImpl() {
-      // adj thread pool?
-      executor = Executors.newFixedThreadPool(3);
-      Log.i(Constants.LOG_TAG, "ANDROID HTTPD SERVER INSTANTIATED");
+   private ExecutorService executor;
+   private String userAgent;
+   private int port;
+   private int numThreads;
+
+   private boolean debug;
+
+   /**
+    * Create HTTPServer.
+    * 
+    * @param userAgent
+    * @param port
+    * @param numThreads
+    */
+   public HTTPServer(String userAgent, int port, int numThreads) {
+
+      if (port < 1024) {
+         throw new IllegalArgumentException("port must not be in reserved range (< 1024)");
+      }
+
+      if (numThreads < 0) {
+         throw new IllegalArgumentException("numThreads invalid");
+      }
+
+      if (userAgent == null) {
+         userAgent = DEFAULT_USER_AGENT;
+      }
+
+      this.userAgent = userAgent;
+      this.port = port;
+      this.numThreads = numThreads;
+
+      LOG.info("ANDROID HTTP server created, userAgent:" + userAgent + " port:" + port + " numThreads:" + numThreads);
    }
 
-   public void start(int port) {
+   public void setDebug(boolean debug) {
+      this.debug = debug;
+   }
+
+   // params passed to start, so we can specify them in interface
+   public void start() {
+
+      if (executor != null) {
+         shutdownExecutor();
+      }
+
+      executor = Executors.newFixedThreadPool(numThreads);
+
       try {
          final ServerSocket serverSocket = new ServerSocket(port);
-         while (!executor.isShutdown()) {
-            executor.submit(new RequestResponse(serverSocket.accept()));
-         }
+
+         LOG.info("ANDROID HTTP server started, addr:" + serverSocket.getInetAddress());
+
+         // submit stuff to executor off of current thread (exec will handle each as a thread, but we don't want to block callers that just use "start" here) 
+         new Thread() {
+            @Override
+            public void run() {
+               try {
+                  while (!executor.isShutdown()) {
+                     executor.submit(new RequestResponseHandler(debug, userAgent, serverSocket.accept()));
+                  }
+               } catch (SocketException e) {
+                  LOG.error("ERROR running server executor:" + e.getMessage(), e);
+               } catch (IOException e) {
+                  LOG.error("ERROR running server executor:" + e.getMessage(), e);
+               }
+            }
+         }.start();
+
       } catch (IOException e) {
-         Log.e(Constants.LOG_TAG, "ERROR starting server:" + e.getMessage(), e);
+         LOG.error("ERROR creating server socket:" + e.getMessage(), e);
       }
    }
 
    public void stop() {
+      shutdownExecutor();
+      LOG.info("ANDROID HTTPD server stopped");
+   }
+
+   //
+   // priv
+   //
+
+   private void shutdownExecutor() {
       executor.shutdown();
       try {
-         executor.awaitTermination(10, TimeUnit.SECONDS);
+         executor.awaitTermination(5, TimeUnit.SECONDS);
       } catch (InterruptedException e) {
-         Log.e(Constants.LOG_TAG, "ERROR stopping server:" + e.getMessage(), e);
+         LOG.error("ERROR stopping server:" + e.getMessage(), e);
       }
       executor.shutdownNow();
    }
 
-   static class RequestResponse implements Runnable {
+   //
+   // classes
+   //
+
+   private static class RequestResponseHandler implements Runnable {
+
+      private final boolean debug;
+      private final String userAgent;
       private final Socket socket;
 
-      RequestResponse(final Socket socket) throws SocketException {
+      RequestResponseHandler(final boolean debug, final String userAgent, final Socket socket) throws SocketException {
+         this.debug = debug;
+         this.userAgent = userAgent;
          this.socket = socket;
       }
 
       public void run() {
+         long start = System.currentTimeMillis();
          try {
-            Log.i(Constants.LOG_TAG, "RequestResponse RUN start - " + System.currentTimeMillis());
+            LOG.debug(userAgent + " server handler start - " + start);
 
             // NOTE HTTP request ends at double newline (each in form of CRLF)
             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
 
+            // parse lines
             List<String> lines = new ArrayList<String>();
             String line = null;
             while ((line = in.readLine()) != null) {
@@ -101,71 +182,99 @@ public class HTTPDServerImpl implements IHTTPDServer {
                lines.add(line);
             }
 
-            /*
-            for (String s : lines) {
-               Log.d(Constants.LOG_TAG, "   *** REQUEST LINE: " + s);
+            if (debug) {
+               for (String s : lines) {
+                  LOG.debug("   *** REQUEST LINE: " + s);
+               }
             }
-            */
 
-            String request = lines.get(0); // first line
-
+            // user first line to determine request type and handle accordingly
+            String request = lines.get(0).trim();
             Matcher get = Pattern.compile("GET /?(\\S*).*").matcher(request);
             if (get.matches()) {
-               ///Log.d(Constants.LOG_TAG, "   HANDLE GET");
-
                request = get.group(1);
-               if (request.endsWith("/")) {
-                  ///Log.d(Constants.LOG_TAG, "   REQUEST FOR PATH/DIR (just respond with server info)");
-                  createTextResponse("AndroidHTTPServer (AndroidModel:" + ANDROID_BUILD_MODEL + " AndroidVersion:"
+
+               if (request.equals("")) {
+                  // if request empty, just respond server info
+                  createTextResponse(userAgent + " (AndroidModel:" + ANDROID_BUILD_MODEL + " AndroidVersion:"
+                           + ANDROID_BUILD_VERSION + ")", Status.OK);
+               } else if (request.endsWith("/")) {
+                  // if request for directory, just respond with server info (no dir index here)
+                  createTextResponse(userAgent + " (AndroidModel:" + ANDROID_BUILD_MODEL + " AndroidVersion:"
                            + ANDROID_BUILD_VERSION + ")", Status.OK);
                } else {
-                  // make sure it's a file, and make sure we can read it
-                  if (request.contains("+")) {
-                     request = request.replace("+", " ");
-                  }
-                  File file = new File(request);
-                  ///Log.d(Constants.LOG_TAG, "   file: " + file.getCanonicalPath());
-                  
-                  // TODO validate supported file type
-                  
-                  if (file.isFile() && file.canRead()) {
-                     Log.i(Constants.LOG_TAG,
-                              "   file is present/readable and allowed, serving it up via path:"
-                                       + file.getAbsolutePath());
-                     try {
-                        createBinaryResponse(file, lines, socket.getOutputStream());
-                     } catch (Exception e) {
-                        Log.e(Constants.LOG_TAG, "ERROR with transferStdIo (fine if client cancels connection) e:" + e.getMessage());
-                        // NOTE if the CLIENT cancels the connection, this error may occur, not fatal
+
+                  request = URLDecoder.decode(request, "UTF-8");
+
+                  SupportedFileType sft = SupportedFileType.getFromString(request);
+                  if (sft != null) {
+                     if (debug) {
+                        LOG.debug(userAgent + " serving FILE request, SupportedFileType:" + sft);
                      }
+                     handleFileRequest(request, lines);
                   } else {
-                     Log.e(Constants.LOG_TAG, "resource cannot be read, or type is not allowed, will not be served");
-                     createTextResponse("resource not allowed", Status.FORBIDDEN);
-                  }
+                     // TODO use protocol handler user passes in for stuff other than files here
+                     createTextResponse("not yet implemented, dude", Status.NOT_IMPL);
+                     if (debug) {
+                        LOG.debug(userAgent + " serving TEXT PROTOCOL request type");
+                     }
+                  }                  
                }
             } else {
-               Log.w(Constants.LOG_TAG, "client made request that was not allowed");
+               LOG.warn("client made request that was not allowed");
                // don't support anything but GET, return 405
                createTextResponse("not allowed", Status.NOT_ALLOWED);
             }
 
-            // closing socket is fine, even if keep-alive, serversocket will maintain?
-            ///Log.d(Constants.LOG_TAG, "   *** closing socket");
+            // close socket
             socket.close();
 
-            Log.i(Constants.LOG_TAG, "RequestResponse RUN stop");
+            LOG.debug(userAgent + " server handler stop, duration:" + (System.currentTimeMillis() - start));
          } catch (IOException e) {
-            Log.e(Constants.LOG_TAG, "ERROR I/O exception", e);
+            LOG.error("ERROR I/O exception", e);
             createTextResponse("ERROR handling request: " + e.getMessage(), Status.ERROR);
          }
-      }      
+      }
+
+      //
+      // request handlers
+      //
+
+      private void handleFileRequest(String request, List<String> lines) {
+         // make sure it's a file, and make sure we can read it
+         File file = new File(request);
+
+         if (!file.isFile()) {
+            createTextResponse("resource not a file", Status.NOT_ALLOWED);
+            LOG.error("resource is not a file, or is not readable");
+            return;
+         }
+
+         if (!file.canRead()) {
+            createTextResponse("resource not readable", Status.NOT_ALLOWED);
+            LOG.error("resource is not a file, or is not readable");
+            return;
+         }
+
+         if (debug) {
+            LOG.debug("   file request, serving it up via path:" + file.getAbsolutePath());
+         }
+         try {
+            createBinaryResponse(file, lines, socket.getOutputStream());
+         } catch (Exception e) {
+            LOG.error("ERROR creating response (normal if client cancels connection) e:" + e.getMessage());
+         }
+      }
+
+      //
+      // response handlers
+      //
 
       private void createTextResponse(final String text, Status status) {
-         ///Log.d(Constants.LOG_TAG, "    createTextResponse text:" + text + " status:" + status);
          try {
             StringBuilder sb = new StringBuilder();
             sb.append("HTTP/1.1 " + status.getDesc() + "\r\n");
-            sb.append("Server: AndroidHTTPServer\r\n");
+            sb.append("Server: " + userAgent + "\r\n");
             sb.append("Content-Type: text/plain; charset=utf-8\r\n");
             sb.append("Accept-Ranges: bytes\r\n");
             sb.append("Date:" + getDateString(new Date()) + "\r\n");
@@ -177,15 +286,15 @@ public class HTTPDServerImpl implements IHTTPDServer {
             OutputStream out = socket.getOutputStream();
             out.write(headerBytes, 0, headerBytes.length);
             out.flush();
-            out.close();            
+            out.close();
          } catch (IOException e) {
-            Log.e(Constants.LOG_TAG, "ERROR I/O exception", e);
+            LOG.error("ERROR I/O exception", e);
          }
       }
 
       private void createBinaryResponse(File source, List<String> requestLines, OutputStream dest) throws Exception {
-         ///Log.d(Constants.LOG_TAG, "    createBinaryResponse");
-         long start = System.currentTimeMillis();
+
+         // binary needs all the request lines to check if "range" is present
 
          // determine if request contains a "range" or not 
          // Support HTTP 1.1 "Partial Content" -- http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html#sec10.2.7
@@ -197,6 +306,7 @@ public class HTTPDServerImpl implements IHTTPDServer {
          long rangeStart = 0;
          long rangeEnd = 0;
          String rangeString = null;
+         // check ALL request lines for Range
          for (String line : requestLines) {
             if (line.startsWith("Range") || line.startsWith("range")) {
                rangePresent = true;
@@ -214,14 +324,14 @@ public class HTTPDServerImpl implements IHTTPDServer {
                                  Long.valueOf(rangeString.substring(rangeString.indexOf("-") + 1, rangeString.length()));
                      }
                   } catch (NumberFormatException e) {
-                     Log.e(Constants.LOG_TAG, "ERROR getting partial content range", e);
+                     LOG.error("ERROR getting partial content range", e);
                      rangeValid = false;
                   }
                }
+               break;
             }
             if (!keepAliveHeaderPresent && line.contains("Connection: keep-alive")
                      || line.contains("Connection: Keep-Alive")) {
-               ///Log.d(Constants.LOG_TAG, "      keep alive header present:" + line);
                keepAliveHeaderPresent = true;
             }
          }
@@ -239,16 +349,10 @@ public class HTTPDServerImpl implements IHTTPDServer {
             rangeValid = false;
          }
 
-         ///Log.d(Constants.LOG_TAG, "      rangePresent:" + rangePresent);
-         ///Log.d(Constants.LOG_TAG, "      rangeValid:" + rangeValid);
-         ///Log.d(Constants.LOG_TAG, "      rangeEndAbsent:" + rangeEndAbsent);
-         ///Log.d(Constants.LOG_TAG, "      rangeString:" + rangeString);
-         ///Log.d(Constants.LOG_TAG, "      rangeStart:" + rangeStart);
-         ///Log.d(Constants.LOG_TAG, "      rangeEnd:" + rangeEnd);
-         ///Log.d(Constants.LOG_TAG, "      rangeSize:" + rangeSize);
-
          if (rangePresent && rangeValid) {
-            ///Log.d(Constants.LOG_TAG, "      rangePresent and rangeValid -- transfer file as partial content using range (206)");
+            if (debug) {
+               LOG.debug("      transfer standard via ranged request, range present and valid (Partial-Content)");
+            }
 
             // HEADER           
             StringBuilder sb = new StringBuilder();
@@ -262,7 +366,10 @@ public class HTTPDServerImpl implements IHTTPDServer {
             sb.append("Content-Length: " + rangeSize + "\r\n");
             sb.append("Connection: close\r\n");
             sb.append("\r\n");
-            Log.d(Constants.LOG_TAG, "      *** RESPONSE:\n" + sb.toString());
+
+            if (debug) {
+               LOG.debug("      *** RESPONSE:\n" + sb.toString());
+            }
 
             byte[] headerBytes = sb.toString().getBytes();
             dest.write(headerBytes, 0, headerBytes.length);
@@ -280,7 +387,7 @@ public class HTTPDServerImpl implements IHTTPDServer {
                iRangeSize = (int) rangeSize;
             } else {
                throw new RuntimeException("ERROR: content rangeSize > Integer.MAX_VALUE");
-            }            
+            }
 
             final int iiRangeSize = iRangeSize;
             FileInputStream fis = new FileInputStream(source) {
@@ -307,11 +414,11 @@ public class HTTPDServerImpl implements IHTTPDServer {
             if (fis != null) {
                fis.close();
             }
-         
+
             // TODO investigate NIO and memory mapped file (also keep file map ref around for next request?)
             // (look at Guava Files.map which returns MappedByteBuffer, ByteBuffer.get, etc)
             // (also potentitally keep the last served file array around, in case re-use?)            
-            
+
             // old way (did not work with Samsung Player)
             /*
             byte[] serveFileBytes = new byte[iRangeSize];
@@ -319,12 +426,12 @@ public class HTTPDServerImpl implements IHTTPDServer {
             dest.write(serveFileBytes);
             dest.flush();
             */
-
          } else if (rangePresent && !rangeValid) {
-            ///Log.d(Constants.LOG_TAG, "      inform client range is invalid (416)");
             createTextResponse("range supplied is invalid", Status.RANGE_INVALID);
          } else {
-            ///Log.d(Constants.LOG_TAG, "      transfer standard file in one shot, range not present (200)");
+            if (debug) {
+               LOG.debug("      transfer standard file in one shot, range not present (200)");
+            }
 
             // HEADER         
             StringBuilder sb = new StringBuilder();
@@ -337,8 +444,11 @@ public class HTTPDServerImpl implements IHTTPDServer {
             sb.append("ETag: " + getETag(source) + "\r\n");
             sb.append("Connection: close\r\n");
             sb.append("\r\n");
-            Log.d(Constants.LOG_TAG, "      *** RESPONSE:\n" + sb.toString());
-            
+
+            if (debug) {
+               LOG.debug("      *** RESPONSE:\n" + sb.toString());
+            }
+
             byte[] headerBytes = sb.toString().getBytes();
             dest.write(headerBytes, 0, headerBytes.length);
             dest.flush();
@@ -354,52 +464,36 @@ public class HTTPDServerImpl implements IHTTPDServer {
 
             // NOTE JavaDoc "Closing the returned OutputStream will close the associated socket"         
             dest.close();
-            
+
             try {
                fis.close();
             } catch (IOException e) {
-               Log.e(Constants.LOG_TAG, "Error closing fis", e);
+               LOG.error("Error closing fis", e);
             }
          }
-
-         Log.i(Constants.LOG_TAG, "      duration:" + (System.currentTimeMillis() - start));
       }
-      
+
+      //
+      // priv helpers
+      //
+
       private String getMimeType(File file) {
          String mimeType = URLConnection.guessContentTypeFromName(file.getName());
-         // change borked "m4v" file extension to mp4 mime
+         // change borked "m4v" file extension to mp4 mime - what's up with this?
          if (mimeType != null && mimeType.endsWith("m4v")) {
             mimeType = "video/mp4";
          }
-         ///Log.i(Constants.LOG_TAG, "      mimeType:" + mimeType);
          return mimeType;
       }
 
       private String getDateString(Date date) {
-         synchronized (DFMT) {
-            return DFMT.format(date);
+         synchronized (INET_DFMT) {
+            return INET_DFMT.format(date);
          }
       }
 
       private String getETag(File f) {
          return Integer.toHexString((f.getAbsolutePath() + f.lastModified() + "" + f.length()).hashCode());
-      }
-   }
-
-   private enum Status {
-      OK("200 OK"), PARTIAL_OK("216 Partial Content"), NOT_FOUND("404 Not Found"),
-      NOT_ALLOWED("405 Method Not Allowed"), FORBIDDEN("403 Forbidden"), RANGE_INVALID(
-               "416 Requested Range Not Satisfiable"), ERROR("500 Internal Server Error"), NOT_IMPL(
-               "501 Not Implemented");
-
-      private String desc;
-
-      private Status(String desc) {
-         this.desc = desc;
-      }
-
-      public String getDesc() {
-         return this.desc;
       }
    }
 }
