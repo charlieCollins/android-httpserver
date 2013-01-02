@@ -97,13 +97,13 @@ public class HTTPServerService extends Service {
    // exposed service methods
    //
 
-   public void startServer(final String userAgent, final short port, final byte numThreads) {
+   public void startServer(final String userAgent, final int port, final int numThreads, final TextRequestCallback callback) {
 
       if (started) {
          throw new IllegalStateException("Error, server is already started");
       }
 
-      server = new HTTPServer(userAgent, port, numThreads);
+      server = new HTTPServer(userAgent, port, numThreads, callback);
       server.start();
       started = true;
    }
@@ -126,10 +126,4 @@ public class HTTPServerService extends Service {
          server.setDebug(debug);
       }
    }
-
-   // TODO allow callers to pass in protocol for handling text?
-   /*
-   public void setProtocol(IHTTPProtocol protocol) {      
-   }
-   */
 }

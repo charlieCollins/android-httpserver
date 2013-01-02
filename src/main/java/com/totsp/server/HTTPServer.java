@@ -1,6 +1,5 @@
 package com.totsp.server;
 
-
 import com.totsp.server.enums.Status;
 import com.totsp.server.enums.SupportedFileType;
 
@@ -30,24 +29,32 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * HTTPD server for serving content FROM an Android device. 
- * (Only handles GET, and has only been tested/used with media files on external storage.)
+ * HTTP server for serving content FROM an Android device (supports very limited GET only). 
+ * Supports two types of requests (and again is very basic): 
  * 
- * (Supports Partial Content, HTTP 206, for streaming.)
+ * 1. MEDIA requests, serves files as streaming media, JPGs, 3GPs, etc (usually from external storage, via MediaStore). 
+ * See SupportedFileType enum for what is recognized as a supported file (mostly matches what Android supports). 
+ * 
+ * 2. TEXT requests, receives text input as a way of passing messages to the server and not expecting a 
+ * response (this is NOT normal HTTP, it's just message passing TO the server, and response is only ACK). 
+ * 
+ * NOTE: If request starts with a ? (querystring) OR does not end in a known file extension then it is 
+ * treated as TEXT request, otherwise it is treated as MEDIA.  
+ *
+ * MEDIA FILE REQUEST EXAMPLE: /storage/emulated/Camera/IMG_12345.jpg
+ * TEXT REQUEST EXAMPLE: /sometexthere/andmorepath_ornot
+ * TEXT WITH QUERYSTRING EXAMPLE: ?foo=sometext&bar=more
+ *  
+ * 
+ * (Supports partial content, HTTP 206, for streaming.)
  * 
  * 
- * @author charliecollins
+ * @author ccollins
  *
  */
 public class HTTPServer {
 
-   // TODO generalize this more and allow users to specify a responsehandler 
-   // (so it can be used for more than just serving files from existing filesystem)
-
    private static final String DEFAULT_USER_AGENT = "AndroidHTTPServer";
-   private static final int BUFFER_SIZE = 4096; // small, yeah, we run this on phones and stuff
-   private static final String ANDROID_BUILD_MODEL = android.os.Build.MODEL;
-   private static final String ANDROID_BUILD_VERSION = android.os.Build.VERSION.RELEASE;
    private static final SimpleDateFormat INET_DFMT = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z");
    static {
       INET_DFMT.setTimeZone(TimeZone.getTimeZone("GMT"));
@@ -59,6 +66,13 @@ public class HTTPServer {
    private String userAgent;
    private int port;
    private int numThreads;
+   
+   /** 
+    * Used only to inform server creator of what request input has been received (first line) for TEXT requests only.
+    * It's safe to ignore this callback and use null if you don't care about external notification of text requests.
+    *  
+    */
+   private TextRequestCallback callback;
 
    private boolean debug;
 
@@ -68,8 +82,9 @@ public class HTTPServer {
     * @param userAgent
     * @param port
     * @param numThreads
+    * @param callback
     */
-   public HTTPServer(String userAgent, int port, int numThreads) {
+   public HTTPServer(String userAgent, int port, int numThreads, TextRequestCallback callback) {
 
       if (port < 1024) {
          throw new IllegalArgumentException("port must not be in reserved range (< 1024)");
@@ -86,6 +101,8 @@ public class HTTPServer {
       this.userAgent = userAgent;
       this.port = port;
       this.numThreads = numThreads;
+      
+      this.callback = callback;
 
       LOG.info("ANDROID HTTP server created, userAgent:" + userAgent + " port:" + port + " numThreads:" + numThreads);
    }
@@ -114,7 +131,7 @@ public class HTTPServer {
             public void run() {
                try {
                   while (!executor.isShutdown()) {
-                     executor.submit(new RequestResponseHandler(debug, userAgent, serverSocket.accept()));
+                     executor.submit(new RequestHandler(debug, userAgent, serverSocket.accept(), callback));
                   }
                } catch (SocketException e) {
                   LOG.error("ERROR running server executor:" + e.getMessage(), e);
@@ -149,19 +166,28 @@ public class HTTPServer {
    }
 
    //
-   // classes
+   // internal handler class (for each socket.accept)
    //
+   
+   private static final String ANDROID_BUILD_MODEL = android.os.Build.MODEL;
+   private static final String ANDROID_BUILD_VERSION = android.os.Build.VERSION.RELEASE;
 
-   private static class RequestResponseHandler implements Runnable {
+   private static final class RequestHandler implements Runnable {
+
+      private static final int BUFFER_SIZE = 4096; // small, yeah, we run this on phones and stuff
+      
+      private static final Logger LOG = LoggerFactory.getLogger(RequestHandler.class);
 
       private final boolean debug;
       private final String userAgent;
       private final Socket socket;
+      private final TextRequestCallback callback;
 
-      RequestResponseHandler(final boolean debug, final String userAgent, final Socket socket) throws SocketException {
+      RequestHandler(final boolean debug, final String userAgent, final Socket socket, final TextRequestCallback callback) throws SocketException {
          this.debug = debug;
          this.userAgent = userAgent;
          this.socket = socket;
+         this.callback = callback;
       }
 
       public void run() {
@@ -205,20 +231,26 @@ public class HTTPServer {
                } else {
 
                   request = URLDecoder.decode(request, "UTF-8");
-
+                  
                   SupportedFileType sft = SupportedFileType.getFromString(request);
-                  if (sft != null) {
+                  
+                  // if queryString, just handle as text
+                  if (request.startsWith("?")) {
+                     handleNonFileRequestAsText(request);
+                     if (debug) {
+                        LOG.debug(userAgent + " received request with queryString, handling as text and returning ACK only");
+                     }
+                  } else if (sft != null) {
                      if (debug) {
                         LOG.debug(userAgent + " serving FILE request, SupportedFileType:" + sft);
                      }
                      handleFileRequest(request, lines);
                   } else {
-                     // TODO use protocol handler user passes in for stuff other than files here
-                     createTextResponse("not yet implemented, dude", Status.NOT_IMPL);
+                     handleNonFileRequestAsText(request);
                      if (debug) {
-                        LOG.debug(userAgent + " serving TEXT PROTOCOL request type");
+                        LOG.debug(userAgent + " received non file request, handling as text and returning ACK only");
                      }
-                  }                  
+                  }
                }
             } else {
                LOG.warn("client made request that was not allowed");
@@ -238,7 +270,14 @@ public class HTTPServer {
 
       //
       // request handlers
-      //
+      //   
+      
+      private void handleNonFileRequestAsText(String request) {
+         // so that non-file requests can be used as just an external HTTP messaging system (with no meaningful response), callback is fired
+         // NOTE may need to sync on this, multiple runnable/threads may get here at the same time, but only one callback (though this is fast)
+         callback.onRequest(request);
+         createTextResponse("ACK", Status.OK);         
+      }
 
       private void handleFileRequest(String request, List<String> lines) {
          // make sure it's a file, and make sure we can read it
@@ -260,7 +299,7 @@ public class HTTPServer {
             LOG.debug("   file request, serving it up via path:" + file.getAbsolutePath());
          }
          try {
-            createBinaryResponse(file, lines, socket.getOutputStream());
+            createBinaryResponse(file, lines);
          } catch (Exception e) {
             LOG.error("ERROR creating response (normal if client cancels connection) e:" + e.getMessage());
          }
@@ -292,7 +331,7 @@ public class HTTPServer {
          }
       }
 
-      private void createBinaryResponse(File source, List<String> requestLines, OutputStream dest) throws Exception {
+      private void createBinaryResponse(File source, List<String> requestLines) throws Exception {
 
          // binary needs all the request lines to check if "range" is present
 
@@ -372,6 +411,7 @@ public class HTTPServer {
             }
 
             byte[] headerBytes = sb.toString().getBytes();
+            OutputStream dest = socket.getOutputStream();
             dest.write(headerBytes, 0, headerBytes.length);
             dest.flush();
 
@@ -450,6 +490,7 @@ public class HTTPServer {
             }
 
             byte[] headerBytes = sb.toString().getBytes();
+            OutputStream dest = socket.getOutputStream();
             dest.write(headerBytes, 0, headerBytes.length);
             dest.flush();
 
@@ -459,10 +500,7 @@ public class HTTPServer {
             for (int read; (read = fis.read(data)) > -1;) {
                dest.write(data, 0, read);
             }
-
             dest.flush();
-
-            // NOTE JavaDoc "Closing the returned OutputStream will close the associated socket"         
             dest.close();
 
             try {

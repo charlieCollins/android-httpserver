@@ -16,7 +16,13 @@ public class HTTPServerTest {
    // NOTE: these are really integration-ish tests, but they serve required purpose of simple-sanity-checking HTTP server
 
    // static server instance so we can use AfterClass
-   private static final HTTPServer SERVER = new HTTPServer("test-server", 8123, 1);
+   private static final TextRequestCallback CALLBACK = new TextRequestCallback() {
+      @Override
+      public void onRequest(String request) {
+         System.out.println("CALLBACK got request:" + request);
+      }      
+   };
+   private static final HTTPServer SERVER = new HTTPServer("test-server", 8123, 1, CALLBACK);
    static {
       SERVER.start();
       SERVER.setDebug(true);
@@ -71,5 +77,19 @@ public class HTTPServerTest {
       Assert.assertTrue(testFile.exists());
       String response = SimpleHttpClient.get(serverUrl + "/" + testFile.getAbsolutePath());
       Assert.assertEquals(544538, response.length());
-   }   
+   } 
+   
+   @Test
+   public void testTextAndCallback() throws Exception {
+      String response = SimpleHttpClient.get(serverUrl + "/DISPLAY_MEDIA~foobar");
+      Assert.assertEquals("ACK", response);
+   }
+   
+   //
+   @Test
+   public void testTextWithQueryStringAndCallback() throws Exception {
+      String exampleQueryString = "?DISPLAY_MEDIA=http%3A%2F%2F192.168.0.142%3A8999%2Fstorage%2Femulated%2F0%2FDCIM%2FCamera%2FIMG_20121227_163753.jpg";
+      String response = SimpleHttpClient.get(serverUrl + exampleQueryString);
+      Assert.assertEquals("ACK", response);
+   }
 }

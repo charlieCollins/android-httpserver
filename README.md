@@ -10,8 +10,8 @@ Also contains a Service wrapper that can be bound to start/stop/control the serv
 (At the time this was written I looked at many small Java HTTP servers but none quite fit the bill, 
 either due to size and dependencies, or just craziness with usage, or bugs/errors on Android, hence the existence of this.) 
 
-Created as a plain Java project (with Android jar for stubs) so that plain JVM dev/testing
-can be done on non-androidy parts.  
+Created as a plain Java project (with Android jar for stubs) so that standard JVM dev/testing
+can be done everywhere possible (server contains no Android dependencies, just Service wrapper). 
 
 
 Logging
