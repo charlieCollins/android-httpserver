@@ -31,4 +31,12 @@ http://www.slf4j.org/api/org/slf4j/impl/SimpleLogger.html
 If you pass -Dorg.slf4j.simpleLogger.defaultLogLevel=debug to your Java process, you will see debug logging.
 
 (NOTE: slf4j works fine on Android, just include slf4j-android -- auto creates log tag.) 
+
+
+Build
+-----
+Uses Maven. 
+```mvn eclipse:eclipse```   
+```mvn clean install```
+etc   
  
