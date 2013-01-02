@@ -21,16 +21,16 @@ Plugin the correct logging implementation library at runtime to control logging.
 The tests use the SLF4J "Simple" logger, which can be configured with system properties:      
 http://www.slf4j.org/api/org/slf4j/impl/SimpleLogger.html      
 
-If you pass -Dorg.slf4j.simpleLogger.defaultLogLevel=debug to your Java process, you will see debug logging.
+If you use the Java system property ``-Dorg.slf4j.simpleLogger.defaultLogLevel=debug``, you will see debug logging, etc.
 
 (NOTE: slf4j works fine on Android, just include slf4j-android -- auto creates log tag.) 
 
 
 Build
 -----
-Uses Maven. 
-```mvn eclipse:eclipse```   
-```mvn clean install```
+Uses Maven.    
+```mvn eclipse:eclipse```      
+```mvn clean install```   
 etc   
 
 
